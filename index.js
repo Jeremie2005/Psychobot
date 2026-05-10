@@ -1,302 +1,462 @@
-// Psychobot - Core V2 (Clean Slate Refactor + WS Support)
-const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers, makeCacheableSignalKeyStore, delay } = require('@whiskeysockets/baileys');
-const QRCode = require("qrcode");
-const pino = require("pino");
-const fs = require("fs");
-const path = require("path");
-const https = require("https");
-const chalk = require("chalk");
-const figlet = require("figlet");
-const WebSocket = require('ws');
-const http = require('http');
-const bodyParser = require("body-parser");
-const os = require('os');
-const axios = require('axios');
-const cron = require('node-cron');
-const googleTTS = require('google-tts-api');
+// ╔══════════════════════════════════════════════════════════════╗
+// ║            PSYCHO BOT — Core V3 | Production Build           ║
+// ║          Clean Architecture | Feature-Rich | Stable          ║
+// ╚══════════════════════════════════════════════════════════════╝
+
+const express        = require('express');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    Browsers,
+    makeCacheableSignalKeyStore,
+    downloadContentFromMessage,
+    delay
+} = require('@whiskeysockets/baileys');
+
+const QRCode     = require('qrcode');
+const pino       = require('pino');
+const fs         = require('fs');
+const path       = require('path');
+const chalk      = require('chalk');
+const figlet     = require('figlet');
+const WebSocket  = require('ws');
+const http       = require('http');
+const bodyParser = require('body-parser');
+const axios      = require('axios');
+const cron       = require('node-cron');
+const googleTTS  = require('google-tts-api');
+const Groq       = require('groq-sdk');
 require('dotenv').config();
-const Groq = require("groq-sdk");
-const GROQ_FALLBACK = String.fromCharCode(103, 115, 107, 95) + "d5jf754z87slN37" + "D332bWGdyb3FYjoQbx" + "MgFsZ8TsxkrP6DlDZCp";
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || GROQ_FALLBACK });
+
 const { convertToOpus } = require('./src/lib/audioHelper');
 
+// ─────────────────────────────────────────────
+//  CONFIG
+// ─────────────────────────────────────────────
+const PORT        = process.env.PORT || 10000;
+const AUTH_FOLDER = path.join(__dirname, 'session');
+const PREFIX      = process.env.PREFIX || '!';
+const BOT_NAME    = 'PSYCHO BOT';
+const BOT_VERSION = '3.0.0';
+const OWNER_PN    = process.env.OWNER_NUMBER || '237696814391';
+const OWNER_LIDS  = process.env.OWNER_IDS
+    ? process.env.OWNER_IDS.split(',').map(id => id.trim())
+    : ['250865332039895', '85483438760009', '128098053963914', '243941626613920'];
 
-async function getAIResponse(prompt, systemPrompt = null) {
-    if (!groq) return "❌ Erreur config: Clé API manquante sur le serveur.";
+// ─────────────────────────────────────────────
+//  GROQ AI
+// ─────────────────────────────────────────────
+const GROQ_FALLBACK = String.fromCharCode(103,115,107,95) + 'd5jf754z87slN37' + 'D332bWGdyb3FYjoQbx' + 'MgFsZ8TsxkrP6DlDZCp';
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || GROQ_FALLBACK });
 
-    if (!prompt || typeof prompt !== 'string') {
-        return "Please provide a valid prompt.";
-    }
+// ─────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────
+const sleep    = (ms) => new Promise(r => setTimeout(r, ms));
+const botStart = Math.floor(Date.now() / 1000);
+const startTime = new Date();
 
-    try {
-        const chatCompletion = await groq.chat.completions.create({
-            "messages": [
-                { "role": "system", "content": systemPrompt || "You are a helpful assistant." },
-                { "role": "user", "content": prompt }
-            ],
-            "model": "llama-3.3-70b-versatile",
-            "temperature": 0.7,
-            "max_tokens": 1024,
-            "top_p": 1,
-            "stream": false
-        });
+const cleanJid = (jid) => jid ? jid.split(':')[0].split('@')[0] : '';
 
-        return chatCompletion.choices[0].message.content.trim();
-    } catch (error) {
-        console.error('[Groq Error]:', error.message);
-        if (error.status === 429) return "⏳ Too many requests. Please try again later.";
-        return "Sorry, I'm having trouble connecting to the AI right now.";
-    }
-}
-
-// --- Configuration ---
-const PORT = process.env.PORT || 10000;
-const AUTH_FOLDER = path.join(__dirname, "session");
-const PREFIX = "!";
-const BOT_NAME = "PSYCHO BOT";
-const OWNER_PN = process.env.OWNER_NUMBER || "237696814391";
-const OWNER_LIDS = process.env.OWNER_IDS ? process.env.OWNER_IDS.split(",").map(id => id.trim()) : ["250865332039895", "85483438760009", "128098053963914", "243941626613920"];
 const isOwner = (jid) => {
     if (typeof jid !== 'string') return false;
-    const clean = jid.split(':')[0].split('@')[0];
-    return (OWNER_PN && clean === OWNER_PN) || OWNER_LIDS.includes(clean);
+    const c = cleanJid(jid);
+    return (OWNER_PN && c === OWNER_PN) || OWNER_LIDS.includes(c);
 };
-const cleanJid = (jid) => jid ? jid.split(':')[0].split('@')[0] : "";
-const startTime = new Date();
-const botStartTime = Math.floor(Date.now() / 1000);
 
-async function notifyOwner(text) {
-    try {
-        const ownerJid = OWNER_PN + "@s.whatsapp.net";
-        if (sock?.user) {
-            await sock.sendMessage(ownerJid, { text: `🛡️ *LOGS SYSTÈME PSYCHO-BOT*\n━━━━━━━━━━━━━━\n${text}` });
-        }
-    } catch (e) {
-        console.error("Owner Notification Failed:", e.message);
-    }
+const formatUptime = (ms) => {
+    const s = Math.floor(ms / 1000);
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+          m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return [d && `${d}j`, h && `${h}h`, m && `${m}m`, `${sec}s`].filter(Boolean).join(' ');
+};
+
+// ─────────────────────────────────────────────
+//  TERMINAL BANNER
+// ─────────────────────────────────────────────
+function printBanner() {
+    console.clear();
+    console.log(chalk.hex('#00FFEA')(figlet.textSync('PSYCHO BOT', { font: 'ANSI Shadow' })));
+    console.log(chalk.hex('#FF6B6B').bold(`  ⚡ Core V${BOT_VERSION} — Production Build`));
+    console.log(chalk.gray('  ─────────────────────────────────────────────────────'));
+    console.log(chalk.cyan(`  📌 Prefix: ${PREFIX}   👑 Owner: ${OWNER_PN}`));
+    console.log(chalk.gray('  ─────────────────────────────────────────────────────\n'));
 }
 
-async function syncSessionToRender() {
-    const apiKey = process.env.RENDER_API_KEY;
-    const serviceId = process.env.RENDER_SERVICE_ID;
-    if (!apiKey || !serviceId) return;
-
-    try {
-        const credsPath = path.join(AUTH_FOLDER, 'creds.json');
-        if (!fs.existsSync(credsPath)) return;
-
-        const creds = fs.readFileSync(credsPath, 'utf-8');
-        const sessionBase64 = Buffer.from(creds).toString('base64');
-
-        if (process.env.SESSION_DATA === sessionBase64) return;
-
-        console.log(chalk.blue("📤 [Render API] Sauvegarde automatique de la session..."));
-        await axios.patch(`https://api.render.com/v1/services/${serviceId}/env-vars`,
-            [{ key: "SESSION_DATA", value: sessionBase64 }],
-            { headers: { Authorization: `Bearer ${apiKey}`, "Accept": "application/json", "Content-Type": "application/json" } }
-        );
-        console.log(chalk.green("✅ [Render API] Session sauvegardée ! Le bot va redémarrer pour appliquer la persistance."));
-    } catch (error) {
-        console.error(chalk.red("❌ [Render API] Échec de la sauvegarde:"), error.response?.data || error.message);
-    }
-}
-
+// ─────────────────────────────────────────────
+//  STATE VARIABLES
+// ─────────────────────────────────────────────
+let sock              = null;
+let latestQR          = null;
 let reconnectAttempts = 0;
-let isStarting = false;
-let latestQR = null;
-let lastConnectedAt = 0;
-let sock = null;
+let isStarting        = false;
+let lastConnectedAt   = 0;
+let lastOwnerActionTime = 0;
+let readReceiptsEnabled = false;
 
 const processedMessages = new Set();
-const messageCache = new Map();
-const antideletePool = new Map(); // Global message pool for antidelete
-let antilinkGroups = new Set(); // Groups with antilink ON
-let antideleteGroups = new Set(); // Groups with antidelete ON
-let readReceiptsEnabled = false; // Global toggle for read receipts
+const messageCache      = new Map();   // ViewOnce cache
+const antideletePool    = new Map();   // All messages pool
+let antilinkGroups   = new Set();
+let antideleteGroups = new Set();
+let antiCallEnabled  = false;          // Block/reject all calls
+let afkMode          = false;          // AFK auto-reply
 
-// --- Settings Persistence ---
+// ─────────────────────────────────────────────
+//  SETTINGS PERSISTENCE
+// ─────────────────────────────────────────────
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+
 function saveSettings() {
     try {
-        const data = {
-            antilink: Array.from(antilinkGroups),
-            antidelete: Array.from(antideleteGroups)
-        };
-        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {
-        console.error("Failed to save settings:", e.message);
-    }
+        fs.writeFileSync(SETTINGS_FILE, JSON.stringify({
+            antilink:   [...antilinkGroups],
+            antidelete: [...antideleteGroups],
+            antiCall:   antiCallEnabled,
+            afkMode,
+            readReceipts: readReceiptsEnabled
+        }, null, 2));
+    } catch (e) { console.error('[Settings] Save failed:', e.message); }
 }
 
 function loadSettings() {
     try {
         if (fs.existsSync(SETTINGS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
-            antilinkGroups = new Set(data.antilink || []);
-            antideleteGroups = new Set(data.antidelete || []);
+            const d          = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+            antilinkGroups   = new Set(d.antilink   || []);
+            antideleteGroups = new Set(d.antidelete || []);
+            antiCallEnabled  = d.antiCall    ?? false;
+            afkMode          = d.afkMode     ?? false;
+            readReceiptsEnabled = d.readReceipts ?? false;
             console.log(chalk.green(`📑 Paramètres chargés: ${antilinkGroups.size} Antilink, ${antideleteGroups.size} Antidelete`));
         }
-    } catch (e) {
-        console.error("Failed to load settings:", e.message);
-    }
+    } catch (e) { console.error('[Settings] Load failed:', e.message); }
 }
 loadSettings();
 
-// --- Helpers ---
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-
-function header() {
-    console.clear();
-    console.log(chalk.cyan(figlet.textSync(BOT_NAME, { horizontalLayout: 'full' })));
-    console.log(chalk.gray('Clean Slate Core V2 | Render Optimized'));
-    console.log(chalk.gray('────────────────────────────────────────────────────'));
+// ─────────────────────────────────────────────
+//  AI CORE
+// ─────────────────────────────────────────────
+async function getAIResponse(prompt, systemPrompt = null, model = 'llama-3.3-70b-versatile') {
+    if (!prompt?.trim()) return '❌ Prompt vide.';
+    try {
+        const res = await groq.chat.completions.create({
+            messages: [
+                { role: 'system', content: systemPrompt || 'You are a helpful assistant. Be concise.' },
+                { role: 'user',   content: prompt }
+            ],
+            model,
+            temperature: 0.7,
+            max_tokens: 1024,
+            stream: false
+        });
+        return res.choices[0].message.content.trim();
+    } catch (err) {
+        console.error('[Groq]', err.message);
+        if (err.status === 429) return '⏳ Limite de requêtes atteinte. Réessayez dans quelques secondes.';
+        return '❌ Erreur IA temporaire.';
+    }
 }
 
-// --- Command Loader ---
+// ─────────────────────────────────────────────
+//  RENDER SESSION SYNC
+// ─────────────────────────────────────────────
+async function syncSessionToRender() {
+    const apiKey = process.env.RENDER_API_KEY, serviceId = process.env.RENDER_SERVICE_ID;
+    if (!apiKey || !serviceId) return;
+    try {
+        const credsPath = path.join(AUTH_FOLDER, 'creds.json');
+        if (!fs.existsSync(credsPath)) return;
+        const sessionBase64 = Buffer.from(fs.readFileSync(credsPath, 'utf-8')).toString('base64');
+        if (process.env.SESSION_DATA === sessionBase64) return;
+        console.log(chalk.blue('📤 [Render] Sauvegarde session...'));
+        await axios.patch(
+            `https://api.render.com/v1/services/${serviceId}/env-vars`,
+            [{ key: 'SESSION_DATA', value: sessionBase64 }],
+            { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }
+        );
+        console.log(chalk.green('✅ [Render] Session sauvegardée.'));
+    } catch (e) { console.error('[Render]', e.response?.data || e.message); }
+}
+
+// ─────────────────────────────────────────────
+//  OWNER NOTIFIER
+// ─────────────────────────────────────────────
+async function notifyOwner(text) {
+    try {
+        if (sock?.user) {
+            await sock.sendMessage(`${OWNER_PN}@s.whatsapp.net`, {
+                text: `🛡️ *LOGS — ${BOT_NAME}*\n━━━━━━━━━━━━━━\n${text}`
+            });
+        }
+    } catch (e) { /* silent */ }
+}
+
+// ─────────────────────────────────────────────
+//  MEDIA RECOVERY HELPER
+// ─────────────────────────────────────────────
+async function recoverMedia(msg) {
+    const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'];
+    const realMsg = msg.message?.ephemeralMessage?.message || msg.message || {};
+
+    for (const type of mediaTypes) {
+        if (realMsg[type]) {
+            const mediaType = type.replace('Message', '');
+            try {
+                const stream = await downloadContentFromMessage(realMsg[type], mediaType);
+                let buf = Buffer.from([]);
+                for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
+                return { buf, mediaType, data: realMsg[type] };
+            } catch (_) {}
+        }
+    }
+    return null;
+}
+
+// ─────────────────────────────────────────────
+//  COMMAND LOADER
+// ─────────────────────────────────────────────
 const commands = new Map();
 const commandFolder = path.join(__dirname, 'commands');
 
 function loadCommands() {
     if (!fs.existsSync(commandFolder)) {
-        console.log(chalk.yellow("⚠️ Dossier commands introuvable."));
+        console.log(chalk.yellow('⚠️  Dossier /commands introuvable.'));
         return;
     }
-    fs.readdirSync(commandFolder).filter(f => f.endsWith('.js')).forEach(file => {
+    const files = fs.readdirSync(commandFolder).filter(f => f.endsWith('.js'));
+    files.forEach(file => {
         try {
-            const command = require(path.join(commandFolder, file));
-            if (command.name) {
-                commands.set(command.name, command);
-                console.log(chalk.green(`✅ Commande chargée: ${command.name}`));
+            delete require.cache[require.resolve(path.join(commandFolder, file))];
+            const cmd = require(path.join(commandFolder, file));
+            if (cmd.name) {
+                commands.set(cmd.name, cmd);
+                if (cmd.aliases) cmd.aliases.forEach(a => commands.set(a, cmd));
+                console.log(chalk.green(`  ✅ ${cmd.name}`) + chalk.gray(` [${cmd.category || 'misc'}]`));
             }
         } catch (err) {
-            console.error(chalk.red(`❌ Erreur chargement ${file}:`), err.message);
+            console.error(chalk.red(`  ❌ ${file}:`), err.message);
         }
     });
+    console.log(chalk.cyan(`\n  📦 ${commands.size} commandes chargées.\n`));
 }
 
-// --- Express App (Immediate Port Binding) ---
-const app = express();
+// ─────────────────────────────────────────────
+//  EXPRESS + WS SERVER
+// ─────────────────────────────────────────────
+const app    = express();
+const server = http.createServer(app);
+const wss    = new WebSocket.Server({ server });
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const __path = process.cwd();
-
-// --- Routes (Public Access) ---
-app.get('/', (req, res) => {
-    res.sendFile(__path + '/index.html');
-});
-
-app.get('/qr', (req, res) => {
-    res.sendFile(__path + '/qr.html');
-});
-
-app.get('/pair', (req, res) => {
-    res.sendFile(__path + '/pair.html');
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => res.status(200).send('OK'));
-app.get('/ping', (req, res) => res.status(200).json({
-    status: 'alive',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    service: BOT_NAME
+app.get('/',       (_, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/qr',     (_, res) => res.sendFile(path.join(__dirname, 'qr.html')));
+app.get('/pair',   (_, res) => res.sendFile(path.join(__dirname, 'pair.html')));
+app.get('/health', (_, res) => res.status(200).send('OK'));
+app.get('/ping',   (_, res) => res.json({
+    status: 'alive', uptime: process.uptime(),
+    timestamp: new Date().toISOString(), version: BOT_VERSION
 }));
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// Broadcast function for WS
-const broadcast = (data) => {
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(data));
-        }
-    });
-};
+const broadcast = (data) => wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify(data));
+});
 
 wss.on('connection', (ws) => {
-    console.log('[WS] Client connected');
-    // Send current status immediately
     if (latestQR) {
-        QRCode.toDataURL(latestQR).then(url => {
-            ws.send(JSON.stringify({ type: 'qr', qr: url }));
-        });
+        QRCode.toDataURL(latestQR).then(url => ws.send(JSON.stringify({ type: 'qr', qr: url })));
     } else if (sock?.user) {
-        ws.send(JSON.stringify({ type: 'connected', user: sock.user.id.split(':')[0] }));
+        ws.send(JSON.stringify({ type: 'connected', user: cleanJid(sock.user.id) }));
     } else {
         ws.send(JSON.stringify({ type: 'status', message: 'Initializing...' }));
     }
 });
 
-// --- Baileys Core ---
+// ─────────────────────────────────────────────
+//  TEXT EXTRACTION HELPER
+// ─────────────────────────────────────────────
+function extractText(msg) {
+    const m = msg.message || {};
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.documentMessage?.caption ||
+        m.buttonsResponseMessage?.selectedButtonId ||
+        m.templateButtonReplyMessage?.selectedId ||
+        m.listResponseMessage?.title ||
+        ''
+    );
+}
+
+// ─────────────────────────────────────────────
+//  ANTIDELETE — SAVE + RECOVER
+// ─────────────────────────────────────────────
+function cacheMessage(msg) {
+    if (!msg.message || msg.message.protocolMessage) return;
+    antideletePool.set(msg.key.id, msg);
+    if (antideletePool.size > 3000) {
+        antideletePool.delete(antideletePool.keys().next().value);
+    }
+}
+
+async function recoverDeletedMessage(jid, targetId) {
+    const archived = antideletePool.get(targetId);
+    if (!archived) return false;
+
+    const sender = archived.key.participant || archived.key.remoteJid;
+    if (archived.key.fromMe || isOwner(sender)) return false;
+
+    const isGroup = jid.endsWith('@g.us');
+    const tag     = `🗑️ *Message supprimé détecté*\n👤 *Auteur:* @${cleanJid(sender)}`;
+
+    try {
+        const target = isGroup ? jid : `${OWNER_PN}@s.whatsapp.net`;
+        await sock.sendMessage(target, { text: tag, mentions: [sender] }, { quoted: archived });
+
+        // Try to also forward media if any
+        const media = await recoverMedia(archived);
+        if (media) {
+            const { buf, mediaType, data } = media;
+            const payload = mediaType === 'image'  ? { image: buf, caption: data.caption || '' }
+                          : mediaType === 'video'  ? { video: buf, caption: data.caption || '' }
+                          : mediaType === 'audio'  ? { audio: buf, mimetype: data.mimetype || 'audio/mp4', ptt: data.ptt || false }
+                          : mediaType === 'sticker'? { sticker: buf }
+                          : mediaType === 'document'? { document: buf, mimetype: data.mimetype, fileName: data.fileName }
+                          : null;
+            if (payload) await sock.sendMessage(target, payload);
+        } else {
+            // Forward text
+            await sock.sendMessage(target, { forward: archived });
+        }
+        return true;
+    } catch (err) {
+        console.error('[Antidelete]', err.message);
+        return false;
+    }
+}
+
+// ─────────────────────────────────────────────
+//  VIEWONCE EXTRACTOR
+// ─────────────────────────────────────────────
+async function extractViewOnce(viewOnceMsg, senderName) {
+    try {
+        const content    = viewOnceMsg.message;
+        const mediaType  = Object.keys(content).find(k => k.includes('Message'));
+        if (!mediaType) return;
+
+        const mediaData  = content[mediaType];
+        const type       = mediaType.replace('Message', '');
+        const stream     = await downloadContentFromMessage(mediaData, type);
+        let buf = Buffer.from([]);
+        for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
+
+        const myJid  = `${cleanJid(sock.user.id)}@s.whatsapp.net`;
+        const caption = `🔓 *Vue Unique Extrait*\n👤 *De:* ${senderName || 'Inconnu'}`;
+
+        if (type === 'image')  await sock.sendMessage(myJid, { image: buf, caption });
+        else if (type === 'video') await sock.sendMessage(myJid, { video: buf, caption });
+        else if (type === 'audio') await sock.sendMessage(myJid, { audio: buf, mimetype: 'audio/mp4', ptt: true });
+
+        return true;
+    } catch (err) {
+        console.error('[ViewOnce]', err.message);
+        return false;
+    }
+}
+
+// ─────────────────────────────────────────────
+//  ANTI-GREETING AI RESPONDER
+// ─────────────────────────────────────────────
+const GREETINGS = ['hello','hi','bonjour','salut','yo','coucou','hey','cc','bonsoir',
+    'sava','cv','hallo','hola','wshp','wsh','bjr','bsr','ola','bonne nuit','bnjr'];
+
+async function handleGreeting(sock, msg, text, remoteJid) {
+    const isOwnerOnline = (Date.now() - lastOwnerActionTime) < 2 * 60 * 1000;
+    if (isOwnerOnline) return;
+
+    const isGroup = remoteJid.endsWith('@g.us');
+    await sock.sendPresenceUpdate('composing', remoteJid);
+    await sleep(800);
+
+    let reply;
+    if (isGroup) {
+        reply = await getAIResponse(
+            `Reply to: "${text}"`,
+            'You are a normal person in a WhatsApp group. Reply naturally and coolly to the greeting. Max 6 words. Match the language (French/English). No bot language.',
+            'llama3-8b-8192'
+        );
+    } else {
+        if (afkMode) {
+            reply = `✌️ Je suis absent pour le moment. Mon propriétaire vous répondra dès que possible.`;
+        } else {
+            reply = await getAIResponse(
+                `Greet this person back: "${text}"`,
+                `You are ${BOT_NAME}, a WhatsApp assistant. Greet back warmly and mention the owner will reply soon. Be brief. Use French if they speak French.`,
+                'llama3-8b-8192'
+            );
+        }
+    }
+
+    await sock.sendMessage(remoteJid, { text: reply }, { quoted: msg });
+    if (readReceiptsEnabled) await sock.readMessages([msg.key]);
+}
+
+// ─────────────────────────────────────────────
+//  BOT CORE
+// ─────────────────────────────────────────────
 async function startBot() {
     if (isStarting) return;
     isStarting = true;
 
-    header();
-    broadcast({ type: 'status', message: 'Starting Bot...' });
+    printBanner();
+    broadcast({ type: 'status', message: 'Starting...' });
 
-    // RENDER SETTLING DELAY (Crucial to avoid session conflicts during deployment handover)
-    const isRender = process.env.RENDER || process.env.RENDER_URL;
-    if (reconnectAttempts === 0 && isRender) {
-        // We wait up to 60s to ensure the old instance is fully terminated by Render
-        const jitter = Math.floor(Math.random() * 20000) + 30000; // 30-50s jitter
-        console.log(chalk.yellow(`⏳ RENDER STABILISATION: Waiting ${Math.floor(jitter / 1000)}s to avoid conflicts...`));
+    // Render stabilization delay
+    if (reconnectAttempts === 0 && (process.env.RENDER || process.env.RENDER_URL)) {
+        const jitter = Math.floor(Math.random() * 20000) + 30000;
+        console.log(chalk.yellow(`⏳ Stabilisation Render: ${Math.floor(jitter/1000)}s...`));
         await sleep(jitter);
     }
 
-    console.log(chalk.cyan("🚀 Connexion au socket WhatsApp..."));
-    broadcast({ type: 'status', message: 'Connecting to WhatsApp...' });
-
-    // Ensure session folder exists
     if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
 
-    // --- SESSION_DATA Support (for Permanent Render Connection) ---
+    // Restore session from env
     if (process.env.SESSION_DATA) {
-        console.log(chalk.blue("🔹 SESSION_DATA détectée. Restauration de la session..."));
         try {
-            const credsPath = path.join(AUTH_FOLDER, 'creds.json');
-            const sessionBuffer = Buffer.from(process.env.SESSION_DATA, 'base64').toString('utf-8');
-
-            // Validate JSON before writing
-            JSON.parse(sessionBuffer);
-
-            fs.writeFileSync(credsPath, sessionBuffer);
-            console.log(chalk.green("✅ Session (creds.json) restaurée avec succès depuis l'environnement."));
-        } catch (e) {
-            console.error(chalk.red("❌ Erreur lors de la restauration SESSION_DATA (vérifiez le format Base64):"), e.message);
-        }
+            const raw = Buffer.from(process.env.SESSION_DATA, 'base64').toString('utf-8');
+            JSON.parse(raw); // Validate
+            fs.writeFileSync(path.join(AUTH_FOLDER, 'creds.json'), raw);
+            console.log(chalk.green('✅ Session restaurée depuis SESSION_DATA.'));
+        } catch (e) { console.error('[Session Restore]', e.message); }
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    const logger = pino({ level: 'info' });
 
-    console.log(chalk.gray("🌐 Récupération de la version WhatsApp Web..."));
-    // Fetch version with a strict 10s timeout to avoid hanging indefinitely
     let version;
     try {
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000));
-        const fetchResult = await Promise.race([
+        const res = await Promise.race([
             fetchLatestBaileysVersion(),
-            timeoutPromise
+            new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 10000))
         ]);
-        version = fetchResult.version;
-    } catch (e) {
-        console.log(chalk.yellow("⚠️ Timeout version, utilisation du fallback."));
+        version = res.version;
+    } catch (_) {
         version = [2, 3000, 1015901307];
+        console.log(chalk.yellow('⚠️  Version fallback activée.'));
     }
-
-    console.log(chalk.gray(`📦 Version Baileys: ${version}`));
 
     sock = makeWASocket({
         version,
         auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger),
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
         },
-        logger,
+        logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
         printQRInTerminal: false,
         markOnlineOnConnect: true,
@@ -306,585 +466,414 @@ async function startBot() {
         keepAliveIntervalMs: 30000,
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
-        shouldIgnoreJid: (jid) => jid?.includes('@newsletter') || jid === 'status@broadcast'
+        shouldIgnoreJid: jid => jid?.includes('@newsletter') || jid === 'status@broadcast'
     });
 
-    sock.ev.on("creds.update", async () => {
+    sock.ev.on('creds.update', async () => {
         await saveCreds();
         if (sock?.user) await syncSessionToRender();
     });
 
-    let criticalErrorCount = 0;
+    let criticalErrors = 0;
 
-    sock.ev.on("connection.update", async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (connection) {
-            console.log(chalk.blue(`📡 Status: ${connection}`));
-        }
-
-        if (qr) {
-            // Safety: Only show QR if we are definitely NOT connected
-            if (connection === 'open') {
-                console.log(chalk.gray(`[QR] Blocked: Connection is already open.`));
-                return;
-            }
+    // ── Connection Lifecycle ──
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+        if (qr && connection !== 'open') {
             latestQR = qr;
-            console.log(chalk.yellow(`[QR] New code generated.`));
             try {
                 const url = await QRCode.toDataURL(qr);
                 broadcast({ type: 'qr', qr: url });
-                broadcast({ type: 'status', message: 'Please scan the new QR Code' });
-            } catch (e) {
-                console.error('QR Encode Error', e);
-            }
+            } catch (_) {}
         }
 
-        if (connection === "close") {
+        if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode;
-            const errorMsg = lastDisconnect?.error?.message || "";
-            const isCritical = errorMsg.includes("PreKey") || errorMsg.includes("Bad MAC") || errorMsg.includes("Session error");
+            const errMsg = lastDisconnect?.error?.message || '';
+            const isCritical = ['PreKey','Bad MAC','Session error'].some(e => errMsg.includes(e));
 
-            console.log(chalk.red(`❌ Connection Closed: ${reason || 'Unknown'}`));
+            console.log(chalk.red(`❌ Déconnecté (${reason || '?'}): ${errMsg.substring(0,60)}`));
 
-            if (isCritical) {
-                criticalErrorCount++;
-                console.log(chalk.yellow(`🚨 Critical Session Error (${criticalErrorCount}/3): ${errorMsg}`));
-
-                if (criticalErrorCount >= 3) {
-                    console.log(chalk.red.bold("� TOTAL SESSION FAILURE. Purging session folder for a clean start..."));
-                    fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-                    process.exit(1); // Render will restart the bot fresh
-                }
+            if (isCritical && ++criticalErrors >= 3) {
+                console.log(chalk.red.bold('🚨 ERREUR CRITIQUE. Purge session...'));
+                fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+                process.exit(1);
             }
 
             broadcast({ type: 'status', message: `Disconnected: ${reason || 'Error'}` });
             isStarting = false;
 
             if (reason === DisconnectReason.loggedOut) {
-                console.log(chalk.red("🛑 Logged Out. Clearing session."));
                 fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-                process.exit(0);
-            } else if (reason === DisconnectReason.connectionReplaced || reason === 440 || reason === 405) {
-                console.log(chalk.red("⚠️ Session Conflict. Restarting..."));
-                sock.end();
-                process.exit(1);
-            } else {
-                reconnectAttempts++;
-                lastConnectedAt = 0;
-                console.log(chalk.yellow(`🔄 Reconnecting (Attempt ${reconnectAttempts})...`));
-                setTimeout(() => startBot(), 5000);
+                return process.exit(0);
             }
-        } else if (connection === "open") {
-            latestQR = null;
+            if ([DisconnectReason.connectionReplaced, 440, 405].includes(reason)) {
+                sock.end();
+                return process.exit(1);
+            }
+
+            reconnectAttempts++;
+            setTimeout(() => startBot(), 5000 + reconnectAttempts * 1000);
+
+        } else if (connection === 'open') {
+            latestQR       = null;
+            criticalErrors = 0;
             reconnectAttempts = 0;
-            criticalErrorCount = 0; // Reset error counter on success
-            isStarting = false;
+            isStarting     = false;
             lastConnectedAt = Date.now();
-            console.log(chalk.green.bold("\n✅ PSYCHOBOT ONLINE AND CONNECTED !"));
 
-            const user = sock.user.id.split(':')[0];
+            const user = cleanJid(sock.user.id);
             broadcast({ type: 'connected', user });
+            console.log(chalk.green.bold(`\n✅ ${BOT_NAME} V${BOT_VERSION} — CONNECTÉ (${user})\n`));
 
-            const msgText = `*✅ 𝗦𝗲𝘀𝘀𝗶𝗼𝗻 𝗖𝗼𝗻𝗻𝗲𝗰𝘁𝗲𝗱!* \n\n🤖 *Bot:* ${BOT_NAME}\n📱 *User:* ${user}\n🔋 *Mode:* Core V2\n⏰ *Time:* ${new Date().toLocaleTimeString()}`;
-            await sock.sendMessage(sock.user.id, { text: msgText });
+            await sock.sendMessage(sock.user.id, {
+                text: `╔══════════════════════════╗\n║  ✅ *${BOT_NAME} V${BOT_VERSION}*  ║\n╚══════════════════════════╝\n\n📱 *Compte:* ${user}\n⏰ *Heure:* ${new Date().toLocaleString('fr-FR')}\n🔋 *Statut:* Connecté & Prêt\n📦 *Commandes:* ${commands.size} chargées\n\nTapez *${PREFIX}menu* pour voir toutes les commandes.`
+            });
 
-            // Critical: Force an immediate sync on first successful connection to ensure SESSION_DATA is populated on Render
             await syncSessionToRender();
         }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
-        if (type !== "notify") return;
+    // ── Message Handler ──
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
         const msg = messages[0];
+        if (!msg || msg.messageTimestamp < botStart) return;
 
-        // 2. Ignore messages sent before the bot was turned on
-        if (msg.messageTimestamp < botStartTime) return;
-
-        // --- ANTIDELETE (Upsert Detection) ---
-        if (msg.message?.protocolMessage?.type === 0 || msg.message?.protocolMessage?.type === 5) {
-            const jid = msg.key.remoteJid;
-            const isGroup = jid.endsWith('@g.us');
-            if (!isGroup || antideleteGroups.has(jid)) {
-                const targetId = msg.message.protocolMessage.key?.id;
-                if (!targetId) return;
-                const archived = antideletePool.get(targetId);
-                if (archived) {
-                    const sender = archived.key.participant || archived.key.remoteJid;
-                    if (archived.key.fromMe || isOwner(sender)) return; // Don't recover owner deletions
-
-                    console.log(chalk.yellow(`[Antidelete] Detected delete (upsert) in ${jid}. Recovering msg ${targetId}`));
-                    const senderText = `🗑️ *Message Supprimé détecté*\n👤 *Auteur:* @${sender.split('@')[0]}`;
-                    if (isGroup) {
-                        await sock.sendMessage(jid, { text: senderText, mentions: [sender] }, { quoted: archived });
-                        await sock.sendMessage(jid, { forward: archived });
-                    } else {
-                        // Forward to Owner Private
-                        const ownerJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                        await sock.sendMessage(ownerJid, { text: `🚨 *Antidelete Privé* (de @${sender.split('@')[0]})\n` + senderText, mentions: [sender] });
-                        await sock.sendMessage(ownerJid, { forward: archived });
-                    }
-                }
-            }
-        }
-
-        // --- AUTO-VIEW & AUTO-LIKE STATUS ---
+        // ─ Status auto-view & like ─
         if (msg.key.remoteJid === 'status@broadcast') {
-            const statusOwner = msg.key.participant || msg.participant;
-            console.log(chalk.gray(`[Status] Auto-viewing status from ${msg.pushName || statusOwner}`));
-
-            // Mark as read
             await sock.readMessages([msg.key]);
-
-            // Auto-like with heart reaction
             try {
-                await sock.sendMessage('status@broadcast', {
-                    react: {
-                        text: '❤️',
-                        key: msg.key
-                    }
-                });
-                console.log(chalk.magenta(`[Status] ❤️ Liked status from ${msg.pushName || statusOwner}`));
-            } catch (err) {
-                console.error('[Status] Failed to react:', err.message);
-            }
-
-            return; // Don't process status as a normal message
+                await sock.sendMessage('status@broadcast', { react: { text: '❤️', key: msg.key } });
+            } catch (_) {}
+            return;
         }
 
         if (!msg.message) return;
-        // if (msg.key.fromMe) return; // Allow bot owner to use commands
 
-        const msgId = msg.key.id;
-        if (processedMessages.has(msgId)) return;
-        processedMessages.add(msgId);
-        if (processedMessages.size > 500) processedMessages.clear(); // Simple GC
+        // ─ Deduplicate ─
+        if (processedMessages.has(msg.key.id)) return;
+        processedMessages.add(msg.key.id);
+        if (processedMessages.size > 1000) processedMessages.clear();
 
-        const remoteJid = msg.key.remoteJid;
-
-        // AI Auto-Reply for Greetings (No Prefix)
-        // Skip if message is from the bot itself or the owner
-        const msgSender = msg.key.participant || msg.participant || msg.key.remoteJid;
-        const msgSenderClean = msgSender.split(':')[0].split('@')[0];
-        const isFromOwner = msg.key.fromMe || isOwner(msg.key.participant || msg.key.remoteJid);
-
-        if (isFromOwner) {
-            lastOwnerActionTime = Date.now();
+        // ─ Protocol / Delete detection ─
+        const proto = msg.message?.protocolMessage;
+        if (proto?.type === 0 || proto?.type === 5) {
+            const jid       = msg.key.remoteJid;
+            const isGroup   = jid.endsWith('@g.us');
+            const shouldAct = !isGroup || antideleteGroups.has(jid);
+            if (shouldAct) await recoverDeletedMessage(jid, proto.key?.id);
+            return;
         }
 
-        // Text extraction
-        const text = msg.message?.conversation ||
-            msg.message?.extendedTextMessage?.text ||
-            msg.message?.imageMessage?.caption ||
-            msg.message?.videoMessage?.caption || "";
+        const remoteJid  = msg.key.remoteJid;
+        const msgSender  = msg.key.participant || msg.key.remoteJid;
+        const isFromOwner = msg.key.fromMe || isOwner(msgSender);
+        const text        = extractText(msg);
 
-        console.log(`[MSG] From ${remoteJid} (${msg.pushName}): ${text.substring(0, 50)}`);
+        if (isFromOwner) lastOwnerActionTime = Date.now();
 
-        // --- ANTILINK ENFORCEMENT ---
-        if (antilinkGroups.has(remoteJid) && !isFromOwner) {
-            const linkPattern = /chat.whatsapp.com\/[a-zA-Z0-9]/;
-            if (linkPattern.test(text)) {
-                console.log(`[Antilink] Link detected from ${msg.pushName}. Deleting...`);
-                // Use helper to delete and kick
-                await sock.sendMessage(remoteJid, { delete: msg.key });
-                const groupMetadata = await sock.groupMetadata(remoteJid);
-                const botIsAdmin = groupMetadata.participants.find(p => cleanJid(p.id) === cleanJid(sock.user.id))?.admin;
-                if (botIsAdmin) {
-                    await sock.groupParticipantsUpdate(remoteJid, [msg.key.participant || remoteJid], "remove");
-                }
-                return; // Stop processing
-            }
-        }
+        console.log(chalk.gray(`[MSG] ${remoteJid} (${msg.pushName || '?'}): `) + chalk.white(text.substring(0, 60)));
 
-        // Cache all messages for Antidelete extraction
-        // Limit cache size to 2000 messages to save memory
-        if (msg.message && !msg.message.protocolMessage) {
-            antideletePool.set(msg.key.id, msg);
-            if (antideletePool.size > 2000) {
-                const firstKey = antideletePool.keys().next().value;
-                antideletePool.delete(firstKey);
-            }
-        }
+        // ─ Cache all messages ─
+        cacheMessage(msg);
 
-        // Cache ViewOnce messages for reaction extraction (Support Ephemeral)
+        // ─ Cache ViewOnce ─
         const realMsg = msg.message?.ephemeralMessage?.message || msg.message;
-        const isViewOnce = realMsg?.viewOnceMessage || realMsg?.viewOnceMessageV2 || realMsg?.viewOnceMessageV2Extension;
-        if (isViewOnce) {
-            console.log(`[Cache] Caching ViewOnce message: ${msg.key.id}`);
+        const isVO = realMsg?.viewOnceMessage || realMsg?.viewOnceMessageV2 || realMsg?.viewOnceMessageV2Extension;
+        if (isVO) {
             messageCache.set(msg.key.id, msg);
-            setTimeout(() => messageCache.delete(msg.key.id), 24 * 60 * 60 * 1000); // 24h cache
+            setTimeout(() => messageCache.delete(msg.key.id), 24 * 60 * 60 * 1000);
         }
 
-        // --- MINI-GAME HANDLER (Passive) ---
-        let gameHandled = false;
-        for (const [name, cmd] of commands) {
-            if (cmd.onMessage) {
-                try {
-                    const result = await cmd.onMessage(sock, msg, text);
-                    if (result === true) {
-                        gameHandled = true;
-                        break;
-                    }
-                } catch (e) {
-                    console.error(`[Game Error] ${name}:`, e.message);
-                }
-            }
-        }
-        if (gameHandled) return;
+        // ─ ViewOnce auto-extract (if owner quoted a VO) ─
+        if (isFromOwner) {
+            const firstType  = Object.keys(msg.message || {})[0];
+            const contextInfo = msg.message?.[firstType]?.contextInfo || msg.message?.extendedTextMessage?.contextInfo;
+            const quotedMsg  = contextInfo?.quotedMessage;
+            if (quotedMsg) {
+                let qContent = quotedMsg;
+                if (qContent.ephemeralMessage)               qContent = qContent.ephemeralMessage.message;
+                if (qContent.viewOnceMessage)                qContent = qContent.viewOnceMessage.message;
+                if (qContent.viewOnceMessageV2)              qContent = qContent.viewOnceMessageV2.message;
+                if (qContent.viewOnceMessageV2Extension)     qContent = qContent.viewOnceMessageV2Extension.message;
 
-        if (!text.startsWith(PREFIX) && !isFromOwner) {
-            const lowerText = text.toLowerCase().trim();
-            const greetings = ['hello', 'hi', 'bonjour', 'salut', 'yo', 'coucou', 'hey', 'cc', 'bonsoir', 'sava', 'cv', 'hallo', 'hola', 'wshp', 'wsh', 'bjr', 'bsr'];
-
-            const isGreeting = greetings.includes(lowerText) ||
-                (lowerText.length < 20 && greetings.some(g => lowerText.startsWith(g)));
-
-            if (isGreeting) {
-                // Check online status (AFK check)
-                const isOwnerOnline = (Date.now() - lastOwnerActionTime) < 2 * 60 * 1000; // 2 mins threshold
-                if (isOwnerOnline) {
-                    console.log(`[AI] Greeting ignored: Owner is considered online (Active ${Math.floor((Date.now() - lastOwnerActionTime) / 1000)}s ago).`);
-                    return;
-                }
-
-                console.log(`[AI] Greeting detected from ${msgSenderClean}: ${text}`);
-                try {
-                    await sock.sendPresenceUpdate('composing', remoteJid);
-
-
-                    const isGroup = remoteJid.endsWith('@g.us');
-                    let prompt = "";
-                    let sysPrompt = "";
-
-                    if (isGroup) {
-                        // Group: Normal person, match mood
-                        sysPrompt = "You are a normal human user, not a bot. Reply to the greeting naturally and coolly. Match the language (French/English) and slang. If they say 'yo', reply with 'yo' or 'weee' etc. Keep it very short (max 5 words). Do not offer help.";
-                        prompt = `Reply to this greeting: "${text}"`;
-                    } else {
-                        // Private: Assistant
-                        sysPrompt = `You are ${BOT_NAME}, limit your answer to sending greetings and say that the owner will respond right after.`;
-                        prompt = `Reply politely to "${text}".`;
-                    }
-
-                    const reply = await getAIResponse(prompt, sysPrompt);
-
-                    await sock.sendMessage(remoteJid, { text: reply }, { quoted: msg });
-
-                    // Mark as read AFTER sending reply if enabled
-                    if (readReceiptsEnabled) {
-                        await sock.readMessages([msg.key]);
-                    }
-                } catch (err) {
-                    console.error("[AI] Error:", err.message);
-                    const errorMsg = "Merci de m'avoir contacté. Mon propriétaire vous répondra dès qu'il sera disponible.";
-                    await sock.sendMessage(remoteJid, { text: `*✅ Message Reçu*\n\n${errorMsg}` }, { quoted: msg });
-
-                    if (readReceiptsEnabled) {
-                        await sock.readMessages([msg.key]);
-                    }
+                const mediaType = Object.keys(qContent).find(k => ['imageMessage','videoMessage','audioMessage'].includes(k));
+                if (mediaType) {
+                    try {
+                        const type   = mediaType.replace('Message','');
+                        const stream = await downloadContentFromMessage(qContent[mediaType], type);
+                        let buf = Buffer.from([]);
+                        for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
+                        const myJid  = `${cleanJid(sock.user.id)}@s.whatsapp.net`;
+                        if (type === 'image') await sock.sendMessage(myJid, { image: buf, caption: `🔓 Vue unique (de ${msg.pushName})` });
+                        else if (type === 'video') await sock.sendMessage(myJid, { video: buf, caption: `🔓 Vue unique (de ${msg.pushName})` });
+                        else if (type === 'audio') await sock.sendMessage(myJid, { audio: buf, mimetype: 'audio/mp4', ptt: true });
+                        await sock.sendMessage(remoteJid, { react: { text: '🔓', key: { remoteJid, fromMe: false, id: contextInfo.stanzaId, participant: contextInfo.participant } } });
+                    } catch (err) { console.error('[VO Extract]', err.message); }
                 }
             }
         }
 
-        // --- UNIVERSAL INCOGNITO EXTRACTION ---
-        const firstType = Object.keys(msg.message || {})[0];
-        const contextInfo = msg.message?.[firstType]?.contextInfo ||
-            msg.message?.extendedTextMessage?.contextInfo ||
-            msg.message?.stickerMessage?.contextInfo;
-
-        const quotedMsg = contextInfo?.quotedMessage;
-
-        if (quotedMsg && isFromOwner) {
-            let qContent = quotedMsg;
-            // Peel wrappers (Robust Peeling)
-            if (qContent.ephemeralMessage) qContent = qContent.ephemeralMessage.message;
-            if (qContent.viewOnceMessage) qContent = qContent.viewOnceMessage.message;
-            if (qContent.viewOnceMessageV2) qContent = qContent.viewOnceMessageV2.message;
-            if (qContent.viewOnceMessageV2Extension) qContent = qContent.viewOnceMessageV2Extension.message;
-
-            const mediaType = qContent.imageMessage ? 'image' :
-                qContent.videoMessage ? 'video' :
-                    qContent.audioMessage ? 'audio' : null;
-
-            if (mediaType) {
-                console.log(`[ViewOnce] Owner extraction trigger (Reply) for ${contextInfo.stanzaId}`);
-                try {
-                    const mediaData = qContent[`${mediaType}Message`];
-                    if (mediaData && mediaData.mediaKey) {
-                        const stream = await downloadContentFromMessage(mediaData, mediaType);
-                        let buffer = Buffer.from([]);
-                        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-
-                        const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                        const caption = `🔓 *ViewOnce Extracted* (From: ${msg.pushName || 'Inconnu'})`;
-                        const options = { jpegThumbnail: null };
-
-                        if (mediaType === 'image') await sock.sendMessage(myJid, { image: buffer, caption }, options);
-                        else if (mediaType === 'video') await sock.sendMessage(myJid, { video: buffer, caption }, options);
-                        else if (mediaType === 'audio') await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
-
-                        // Feedback: React on the VIEW ONCE message itself
-                        await sock.sendMessage(remoteJid, {
-                            react: { text: "🔓", key: { remoteJid, fromMe: false, id: contextInfo.stanzaId, participant: contextInfo.participant } }
-                        });
-                    }
-                } catch (err) {
-                    console.error("[Incognito Reply] Error:", err.message);
-                }
-            }
-        }
-
-        // Command Handling
-        if (text.startsWith(PREFIX)) {
-            const args = text.slice(PREFIX.length).trim().split(/ +/);
-            const commandName = args.shift().toLowerCase();
-
-            // Special Handle for internal state toggles
-            if (commandName === 'readreceipts') {
-                if (isFromOwner) {
-                    const toggle = args[0]?.toLowerCase();
-                    if (toggle === 'on') readReceiptsEnabled = true;
-                    else if (toggle === 'off') readReceiptsEnabled = false;
-                    else readReceiptsEnabled = !readReceiptsEnabled;
-
-                    await sock.sendMessage(remoteJid, { text: `✅ Read Receipts: *${readReceiptsEnabled ? 'ON' : 'OFF'}*` }, { quoted: msg });
-                } else {
-                    await sock.sendMessage(remoteJid, { text: "❌ Owner only." }, { quoted: msg });
-                }
+        // ─ Antilink ─
+        if (antilinkGroups.has(remoteJid) && !isFromOwner) {
+            const hasLink = /chat\.whatsapp\.com\/[a-zA-Z0-9]+|https?:\/\/[^\s]+/i.test(text);
+            if (hasLink) {
+                await sock.sendMessage(remoteJid, { delete: msg.key });
+                const meta    = await sock.groupMetadata(remoteJid);
+                const botAdmin = meta.participants.find(p => cleanJid(p.id) === cleanJid(sock.user.id))?.admin;
+                if (botAdmin) await sock.groupParticipantsUpdate(remoteJid, [msgSender], 'remove');
                 return;
             }
+        }
 
-            const command = commands.get(commandName);
-
-            if (command) {
-                // SECURITY: Only the bot owner can execute adminOnly commands
-                if (command.adminOnly && !isFromOwner) {
-                    return await sock.sendMessage(remoteJid, { text: "❌ Cette commande est réservée au propriétaire du bot (Owner Only)." }, { quoted: msg });
-                }
-
-                console.log(`[CMD] Executing ${commandName}...`);
+        // ─ Mini-game passive handlers ─
+        let handled = false;
+        for (const [, cmd] of commands) {
+            if (cmd.onMessage) {
                 try {
-                    // Inject replyWithTag helper
-                    const replyWithTag = async (s, j, m, t) => {
-                        await s.sendMessage(j, { text: t, mentions: [m.key.participant || m.key.remoteJid] }, { quoted: m });
-                    };
-                    // Provide group sets for state management
-                    await command.run({ sock, msg, commands, replyWithTag, args, antilinkGroups, antideleteGroups });
-
-                    // Auto-save settings if they might have changed
-                    if (commandName === 'antilink' || commandName === 'antidelete') {
-                        saveSettings();
-                    }
-                } catch (err) {
-                    console.error(`Erreur ${commandName}:`, err);
-                }
+                    if (await cmd.onMessage(sock, msg, text) === true) { handled = true; break; }
+                } catch (_) {}
             }
+        }
+        if (handled) return;
+
+        // ─ No-prefix AI greeting ─
+        if (!text.startsWith(PREFIX) && !isFromOwner) {
+            const lower = text.toLowerCase().trim();
+            const isGreeting = GREETINGS.includes(lower) || (lower.length < 20 && GREETINGS.some(g => lower.startsWith(g)));
+            if (isGreeting) await handleGreeting(sock, msg, text, remoteJid);
+            return;
+        }
+
+        // ─ Command Routing ─
+        if (!text.startsWith(PREFIX)) return;
+        const args        = text.slice(PREFIX.length).trim().split(/\s+/);
+        const cmdName     = args.shift().toLowerCase();
+        const rawArgs     = args;
+
+        // ── Built-in state commands ──
+        const builtins = {
+            async readreceipts() {
+                if (!isFromOwner) return reply('❌ Réservé au propriétaire.');
+                const t = rawArgs[0]?.toLowerCase();
+                readReceiptsEnabled = t === 'on' ? true : t === 'off' ? false : !readReceiptsEnabled;
+                saveSettings();
+                reply(`✅ Read Receipts: *${readReceiptsEnabled ? 'ON' : 'OFF'}*`);
+            },
+            async afk() {
+                if (!isFromOwner) return reply('❌ Réservé au propriétaire.');
+                afkMode = !afkMode;
+                saveSettings();
+                reply(`✅ Mode AFK: *${afkMode ? 'ON' : 'OFF'}*\n${afkMode ? '💤 Je répondrai automatiquement aux messages.' : '👋 Mode AFK désactivé.'}`);
+            },
+            async anticall() {
+                if (!isFromOwner) return reply('❌ Réservé au propriétaire.');
+                antiCallEnabled = !antiCallEnabled;
+                saveSettings();
+                reply(`✅ Anti-Call: *${antiCallEnabled ? 'ON' : 'OFF'}*`);
+            },
+            async reload() {
+                if (!isFromOwner) return reply('❌ Réservé au propriétaire.');
+                loadCommands();
+                reply(`♻️ *${commands.size} commandes rechargées.*`);
+            },
+            async ping() {
+                const start = Date.now();
+                const m = await sock.sendMessage(remoteJid, { text: '🏓 Pong...' }, { quoted: msg });
+                const lat = Date.now() - start;
+                await sock.sendMessage(remoteJid, {
+                    text: `🏓 *PONG!*\n⚡ Latence: *${lat}ms*\n⏱️ Uptime: *${formatUptime(Date.now() - startTime)}*`,
+                    edit: m.key
+                });
+            },
+            async uptime() {
+                reply(`⏱️ *Uptime:* ${formatUptime(Date.now() - startTime)}\n🕐 *Démarré le:* ${startTime.toLocaleString('fr-FR')}`);
+            },
+            async menu() {
+                const cats = {};
+                for (const [name, cmd] of commands) {
+                    if (cmd.aliases?.includes(name) && cmd.name !== name) continue;
+                    const cat = cmd.category || 'Divers';
+                    cats[cat] = cats[cat] || [];
+                    cats[cat].push(name);
+                }
+                let out = `╔══════════════════════════╗\n║  🤖 *${BOT_NAME} — MENU*  ║\n╚══════════════════════════╝\n\n`;
+                const icons = { 'Admin':'🛡️', 'IA':'🧠', 'Groupe':'👥', 'Médias':'🎬', 'Jeux':'🎮', 'Divers':'⚙️', 'Info':'ℹ️', 'Fun':'🎉' };
+                for (const [cat, cmds] of Object.entries(cats).sort()) {
+                    out += `${icons[cat] || '🔹'} *${cat}*\n`;
+                    cmds.sort().forEach(c => { out += `  ${PREFIX}${c}\n`; });
+                    out += '\n';
+                }
+                out += `━━━━━━━━━━━━━━━━\n📦 *${commands.size}* commandes | Préfixe: *${PREFIX}*\n💡 *${PREFIX}help <cmd>* pour l'aide détaillée`;
+                reply(out);
+            },
+            async help() {
+                const target = rawArgs[0];
+                if (!target) return builtins.menu();
+                const cmd = commands.get(target);
+                if (!cmd) return reply(`❌ Commande *${PREFIX}${target}* introuvable.`);
+                reply(
+                    `📖 *${PREFIX}${cmd.name}*\n` +
+                    `━━━━━━━━━━━━━━\n` +
+                    `📝 *Description:* ${cmd.description || 'Aucune description'}\n` +
+                    `🏷️ *Catégorie:* ${cmd.category || 'Divers'}\n` +
+                    (cmd.usage    ? `🔧 *Usage:* ${PREFIX}${cmd.usage}\n` : '') +
+                    (cmd.aliases  ? `🔀 *Alias:* ${cmd.aliases.map(a => PREFIX + a).join(', ')}\n` : '') +
+                    (cmd.adminOnly ? `🔒 *Propriétaire only*\n` : '')
+                );
+            }
+        };
+
+        const reply = (text) => sock.sendMessage(remoteJid, { text }, { quoted: msg });
+        const ctx   = {
+            sock, msg, args: rawArgs, remoteJid, isFromOwner, isOwner: isFromOwner,
+            isGroup: remoteJid.endsWith('@g.us'),
+            sender: msgSender, text, prefix: PREFIX,
+            antilinkGroups, antideleteGroups,
+            reply,
+            replyMention: async (t) => sock.sendMessage(remoteJid, { text: t, mentions: [msgSender] }, { quoted: msg }),
+            getAIResponse
+        };
+
+        if (builtins[cmdName]) return builtins[cmdName]();
+
+        const command = commands.get(cmdName);
+        if (!command) {
+            // Unknown command — silent ignore or suggest
+            return;
+        }
+
+        if (command.adminOnly && !isFromOwner) {
+            return reply('❌ Cette commande est réservée au propriétaire.');
+        }
+        if (command.groupOnly && !ctx.isGroup) {
+            return reply('❌ Cette commande est utilisable uniquement dans les groupes.');
+        }
+
+        console.log(chalk.cyan(`[CMD] ${cmdName} ← ${msg.pushName || cleanJid(msgSender)}`));
+        try {
+            await command.run(ctx);
+            if (['antilink','antidelete'].includes(cmdName)) saveSettings();
+        } catch (err) {
+            console.error(`[CMD Error] ${cmdName}:`, err.message);
+            reply(`❌ Erreur lors de l'exécution de *${PREFIX}${cmdName}*.`);
         }
     });
 
-    // --- ANTIDELETE (Update Detection) ---
-    sock.ev.on("messages.update", async (updates) => {
-        for (const update of updates) {
-            // Support for various Baileys deletion notification structures
-            const proto = update.update?.message?.protocolMessage || update.update?.protocolMessage;
+    // ── Antidelete via messages.update ──
+    sock.ev.on('messages.update', async (updates) => {
+        for (const { key, update } of updates) {
+            const proto = update?.message?.protocolMessage || update?.protocolMessage;
+            if (!proto || (proto.type !== 0 && proto.type !== 5)) continue;
 
-            if (proto?.type === 0 || proto?.type === 5) {
-                const jid = update.key.remoteJid;
-                const isGroup = jid.endsWith('@g.us');
+            const jid     = key.remoteJid;
+            const isGroup = jid.endsWith('@g.us');
+            if (isGroup && !antideleteGroups.has(jid)) continue;
 
-                // Enforce group setting but allow private chats always
-                if (isGroup && !antideleteGroups.has(jid)) continue;
-
-                const targetId = proto.key?.id || update.key.id;
-                const archived = antideletePool.get(targetId);
-
-                if (archived) {
-                    const sender = archived.key.participant || archived.key.remoteJid;
-                    if (archived.key.fromMe || isOwner(sender)) continue; // Don't recover owner deletions
-
-                    console.log(chalk.yellow(`[Antidelete] Detected delete in ${jid}. Recovering msg ${targetId}`));
-                    const senderText = `🗑️ *Message Supprimé détecté*\n👤 *Auteur:* @${sender.split('@')[0]}`;
-
-                    try {
-                        if (isGroup) {
-                            await sock.sendMessage(jid, { text: senderText, mentions: [sender] }, { quoted: archived });
-                            await sock.sendMessage(jid, { forward: archived });
-                        } else {
-                            // Forward to Owner Private
-                            const ownerJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                            await sock.sendMessage(ownerJid, { text: `🚨 *Antidelete Privé* (de @${sender.split('@')[0]})\n` + senderText, mentions: [sender] });
-                            await sock.sendMessage(ownerJid, { forward: archived });
-                        }
-                    } catch (err) {
-                        console.error("[Antidelete] Recovery failed:", err.message);
-                    }
-                }
-            }
+            await recoverDeletedMessage(jid, proto.key?.id || key.id);
         }
     });
-    const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
-    // Reaction Handler for ViewOnce Extraction (Incognito)
-    sock.ev.on("messages.reaction", async (reactions) => {
-        const cleanJid = (jid) => jid ? jid.split(':')[0].split('@')[0] : "";
-
+    // ── ViewOnce extraction via reaction ──
+    sock.ev.on('messages.reaction', async (reactions) => {
         for (const reaction of reactions) {
-            const { key } = reaction;
-
-            // SECURITY: Only extraction if the reactor is the Owner
             const reactor = reaction.key.fromMe ? sock.user.id : (reaction.key.participant || reaction.key.remoteJid);
-            const reactorClean = cleanJid(reactor);
-            const isOwnerCheck = reaction.key.fromMe || isOwner(reaction.key.participant || reaction.key.remoteJid);
+            if (!reaction.key.fromMe && !isOwner(reactor)) continue;
 
-            if (!isOwnerCheck) continue;
+            const archived = messageCache.get(reaction.key.id);
+            if (!archived) continue;
 
-            const archivedMsg = messageCache.get(key.id);
-            if (archivedMsg) {
-                let content = archivedMsg.message;
-                if (content.ephemeralMessage) content = content.ephemeralMessage.message;
-                const viewOnce = content?.viewOnceMessage || content?.viewOnceMessageV2 || content?.viewOnceMessageV2Extension;
+            let content = archived.message;
+            if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
+            const vo = content?.viewOnceMessage || content?.viewOnceMessageV2 || content?.viewOnceMessageV2Extension;
+            if (!vo) continue;
 
-                if (viewOnce) {
-                    console.log(`[ViewOnce] Owner extraction trigger (Reaction) for ${key.id}`);
-                    try {
-                        const viewOnceContent = viewOnce.message;
-                        const mediaType = Object.keys(viewOnceContent).find(k => k.includes('Message'));
-                        if (!mediaType) return;
-
-                        const mediaData = viewOnceContent[mediaType];
-                        const stream = await downloadContentFromMessage(mediaData, mediaType.replace('Message', ''));
-                        let buffer = Buffer.from([]);
-                        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-
-                        const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-                        const caption = `🔓 *ViewOnce Extracted* (From: ${archivedMsg.pushName || 'Inconnu'})`;
-                        const type = mediaType.replace('Message', '');
-                        const options = { jpegThumbnail: null };
-
-                        if (type === 'image') await sock.sendMessage(myJid, { image: buffer, caption }, options);
-                        else if (type === 'video') await sock.sendMessage(myJid, { video: buffer, caption }, options);
-                        else if (type === 'audio') await sock.sendMessage(myJid, { audio: buffer, mimetype: 'audio/mp4', ptt: true });
-
-                        // Feedback
-                        await sock.sendMessage(key.remoteJid, { react: { text: "🔓", key } });
-                    } catch (err) {
-                        console.error("[Incognito Reaction] Error:", err.message);
-                    }
-                }
+            const success = await extractViewOnce(vo, archived.pushName);
+            if (success) {
+                await sock.sendMessage(reaction.key.remoteJid, { react: { text: '🔓', key: reaction.key } });
             }
         }
     });
 
-    // --- AI CALL HANDLER (Smart Digital Secretary) ---
-    sock.ev.on('call', async (callEvents) => {
-        for (const call of callEvents) {
-            // Check for missed, rejected or timeout statuses
-            if (call.status === 'timeout' || call.status === 'reject' || (call.status === 'terminate' && !call.isGroup)) {
-                const callerId = call.from;
-                console.log(chalk.yellow(`[Call] Missed/Rejected call from ${callerId}`));
-
-                try {
-                    // 1. Generate professional excuse via AI (Llama 3 8B for speed)
-                    let aiText = "Désolé, je ne peux pas répondre pour le moment. Je vous rappelle dès que possible.";
-
-                    if (groq) {
-                        try {
-                            const chatCompletion = await groq.chat.completions.create({
-                                messages: [
-                                    {
-                                        role: "system",
-                                        content: "Tu es l'assistant de PSYCHO-BOT. Génère une seule phrase très courte (max 15 mots) et professionnelle pour dire que le propriétaire est occupé. Pas d'humour, reste sérieux."
-                                    }
-                                ],
-                                model: "llama3-8b-8192",
-                                max_tokens: 100,
-                            });
-                            aiText = chatCompletion.choices[0]?.message?.content || aiText;
-                        } catch (aiErr) {
-                            console.error('[Call AI Error]:', aiErr.message);
-                        }
-                    }
-
-                    // 2. Convert to Voice Note (Google TTS)
-                    const audioUrl = googleTTS.getAudioUrl(aiText, {
-                        lang: 'fr',
-                        slow: false,
-                        host: 'https://translate.google.com',
-                    });
-
-                    // 3. Send Voice Note to Caller (converted to Opus for iOS support)
-                    try {
-                        const audioPath = await convertToOpus(audioUrl);
-                        await sock.sendMessage(callerId, {
-                            audio: { url: audioPath },
-                            mimetype: 'audio/ogg; codecs=opus',
-                            ptt: true
-                        });
-                        fs.unlinkSync(audioPath);
-                    } catch (e) {
-                        console.error('[Call Voice Error]', e.message);
-                    }
-
-                    // 4. Notify Owner
-                    const ownerJid = (sock.user?.id || OWNER_PN + "@s.whatsapp.net").split(':')[0] + "@s.whatsapp.net";
-                    await sock.sendMessage(ownerJid, {
-                        text: `📞 *Appel Manqué (Auto-Reply)*\n━━━━━━━━━━━━━━\n👤 *De:* @${callerId.split('@')[0]}\n📝 *Assistant:* "${aiText.trim()}"`,
-                        mentions: [callerId]
-                    });
-
-                    console.log(`✅ Missed call handled with AI Voice Note: "${aiText}"`);
-                    await notifyOwner(`📞 Appel manqué de @${callerId.split('@')[0]} géré par l'IA.`);
-
-                } catch (err) {
-                    console.error("[Call Handler Error]:", err.message);
-                }
+    // ── Call Handler (AI Voice Note) ──
+    sock.ev.on('call', async (calls) => {
+        for (const call of calls) {
+            if (!['timeout','reject','terminate'].includes(call.status)) continue;
+            if (antiCallEnabled) {
+                await sock.rejectCall(call.id, call.from);
             }
+
+            console.log(chalk.yellow(`[Call] Appel de ${call.from}`));
+            const callerId = call.from;
+
+            try {
+                // AI excuse
+                let aiText = 'Le propriétaire est indisponible pour le moment. Il vous rappellera dès que possible.';
+                try {
+                    aiText = await getAIResponse(
+                        'Génère une phrase professionnelle pour indiquer que le propriétaire est occupé. Max 15 mots. Français.',
+                        null, 'llama3-8b-8192'
+                    );
+                } catch (_) {}
+
+                // TTS → Voice Note
+                try {
+                    const audioUrl  = googleTTS.getAudioUrl(aiText, { lang: 'fr', slow: false, host: 'https://translate.google.com' });
+                    const audioPath = await convertToOpus(audioUrl);
+                    await sock.sendMessage(callerId, { audio: { url: audioPath }, mimetype: 'audio/ogg; codecs=opus', ptt: true });
+                    fs.unlinkSync(audioPath);
+                } catch (e) {
+                    await sock.sendMessage(callerId, { text: `👋 ${aiText}` });
+                }
+
+                // Notify owner
+                const ownerJid = `${OWNER_PN}@s.whatsapp.net`;
+                await sock.sendMessage(ownerJid, {
+                    text: `📞 *Appel manqué*\n👤 *De:* @${cleanJid(callerId)}\n💬 *Réponse IA:* _${aiText}_`,
+                    mentions: [callerId]
+                });
+            } catch (err) { console.error('[Call]', err.message); }
         }
     });
 }
 
-// --- Anti-Idle (Keep Alive) ---
-// Self-ping every 5 minutes to keep the instance alive on Render Free Tier
+// ─────────────────────────────────────────────
+//  CRON — KEEP ALIVE
+// ─────────────────────────────────────────────
 cron.schedule('*/5 * * * *', async () => {
     try {
-        const renderUrl = process.env.RENDER_URL;
-        if (renderUrl) {
-            const url = renderUrl.endsWith('/') ? renderUrl : `${renderUrl}/`;
-            await axios.get(`${url}ping`);
-            process.stdout.write(chalk.gray('🔄 Factory Keep-alive successful\n'));
+        const url = process.env.RENDER_URL;
+        if (url) {
+            await axios.get(`${url.replace(/\/$/, '')}/ping`);
+            process.stdout.write(chalk.gray('·'));
         }
-    } catch (error) {
-        console.error(chalk.red('❌ Factory Keep-alive failed:'), error.message);
-    }
+    } catch (_) {}
 });
 
+// ─────────────────────────────────────────────
+//  BOOT
+// ─────────────────────────────────────────────
 loadCommands();
 server.listen(PORT, () => {
-    console.log(chalk.blue(`[Server] Port ${PORT} lié.`));
+    console.log(chalk.blue(`[Server] Écoute sur le port ${PORT}\n`));
     startBot();
 });
 
-process.on('SIGTERM', async () => {
-    console.log(chalk.red("\n🛑 SIGTERM RECEIVED. Shutting down bot..."));
-    if (sock) {
-        sock.end();
-        console.log(chalk.gray("Socket closed."));
-    }
-    process.exit(0);
-});
+// ─────────────────────────────────────────────
+//  PROCESS GUARDS
+// ─────────────────────────────────────────────
+const IGNORABLE = ['Connection Closed','Timed Out','conflict','Stream Errored','Bad MAC','No session','EPIPE','ECONNRESET','PreKey'];
 
+process.on('SIGTERM', () => { if (sock) sock.end(); process.exit(0); });
 
-process.on('uncaughtException', (error) => {
-    const msg = error?.message || String(error);
-    const ignorableErrors = ['Connection Closed', 'Timed Out', 'conflict', 'Stream Errored', 'Bad MAC', 'No session found', 'No matching sessions', 'EPIPE', 'ECONNRESET', 'PreKeyError'];
-    if (ignorableErrors.some(e => msg.includes(e))) return;
-    console.error('Uncaught Exception:', error);
+process.on('uncaughtException', (err) => {
+    if (IGNORABLE.some(e => err?.message?.includes(e))) return;
+    console.error('[Uncaught]', err);
     process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
     const msg = reason?.message || String(reason);
-    const ignorableErrors = ['Connection Closed', 'Timed Out', 'conflict', 'Stream Errored', 'Bad MAC', 'No session found', 'No matching sessions', 'EPIPE', 'ECONNRESET', 'PreKeyError'];
-    if (ignorableErrors.some(e => msg.includes(e))) return;
-    console.error('Unhandled Rejection at:', reason);
+    if (IGNORABLE.some(e => msg.includes(e))) return;
+    console.error('[UnhandledRejection]', reason);
 });
